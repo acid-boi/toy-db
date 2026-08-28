@@ -15,7 +15,7 @@
       exit(EXIT_FAILURE);                                                      \
     }                                                                          \
   }
-
+#define min(a, b) ((a) > (b) ? (b) : (a))
 int getLen(int slot, byte *pageBuf);
 int getNumSlots(byte *pageBuf);
 void setNumSlots(byte *pageBuf, int nslots);
@@ -23,7 +23,8 @@ int getNthSlotOffset(int slot, char *pageBuf);
 int getFreeSpaceOffset(byte *pageBuf); // [Yash] Declared two helper functions
                                        // for getting free spcae offset.
 void setFreeSpaceOffset(int offset, byte *pageBuf);
-int getLenRecordPossible(byte *pagebuf);
+int getLenRecordPossible(byte *pagebuf); //[Yash] Declared a helper function to
+                                         //make implementation check easier
 
 int getNumSlots(byte *pageBuf) { //[Yash] Wrote helper functions because
                                  // couldn't find a definition.
@@ -104,7 +105,8 @@ void Table_Close(Table *tbl) {
   free(tbl);
 }
 
-int Table_Insert(Table *tbl, byte *record, int len, RecId *rid) {
+int Table_Insert(Table *tbl, byte *record, int len,
+                 RecId *rid) { //[Yash] Implemented this function
   // Allocate a fresh page if len is not enough for remaining space
   // Get the next free slot on page, and copy record in the free
   // space
@@ -114,18 +116,40 @@ int Table_Insert(Table *tbl, byte *record, int len, RecId *rid) {
   if (tbl->lastPageWritten == -1) {
     int err = PF_AllocPage(tbl->pf, &pagenum, &pagebuf);
     checkerr(err);
+    setFreeSpaceOffset(4096, pagebuf);
+    setNumSlots(pagebuf, 0);
   } else {
     pagenum = tbl->lastPageWritten;
     int err = PF_GetThisPage(tbl->pf, pagenum, &pagebuf);
     checkerr(err);
     int length = getLenRecordPossible(pagebuf);
-    if (len < length) {
-      // [Yash] Logic for pasting the record into the buffer and adding a slot
-      // entry and updating the offset variable.
-    } else {
-      //[Yash] Logic for creating a new page and then adding in it.
+    if (len > length) {
+      err = PF_UnfixPage(tbl->pf, pagenum, FALSE);
+      checkerr(err);
+      err = PF_AllocPage(tbl->pf, &pagenum, &pagebuf);
+      checkerr(err);
+      setFreeSpaceOffset(4096, pagebuf);
+      setNumSlots(pagebuf, 0);
     }
   }
+
+  int freeOffset = getFreeSpaceOffset(pagebuf);
+  int numSlots = getNumSlots(pagebuf);
+
+  memcpy(pagebuf + freeOffset - len, record, len);
+
+  setFreeSpaceOffset(freeOffset - len, pagebuf);
+  EncodeShort((short)(freeOffset - len), pagebuf + 4 + 4 * numSlots);
+  EncodeShort((short)len, pagebuf + 4 + 4 * numSlots + 2);
+  setNumSlots(pagebuf, numSlots + 1);
+
+  *rid = (pagenum << 16) | numSlots;
+  tbl->lastPageWritten = pagenum;
+
+  int err = PF_UnfixPage(tbl->pf, pagenum, TRUE);
+  checkerr(err);
+
+  return 0;
 }
 
 #define checkerr(err)                                                          \
@@ -140,23 +164,42 @@ int Table_Insert(Table *tbl, byte *record, int len, RecId *rid) {
   Given an rid, fill in the record (but at most maxlen bytes).
   Returns the number of bytes copied.
  */
-int Table_Get(Table *tbl, RecId rid, byte *record, int maxlen) {
+int Table_Get(Table *tbl, RecId rid, byte *record,
+              int maxlen) { //[Yash] Implemented this function
   int slot = rid & 0xFFFF;
   int pageNum = rid >> 16;
-
-  UNIMPLEMENTED;
   // PF_GetThisPage(pageNum)
   // In the page get the slot offset of the record, and
   // memcpy bytes into the record supplied.
   // Unfix the page
-  return len; // return size of record
+  byte *pagebuf;
+  int err = PF_GetThisPage(tbl->pf, pageNum, &pagebuf);
+  checkerr(err);
+  int offset = getNthSlotOffset(slot, pagebuf);
+  int recordLength = getLen(slot, pagebuf);
+  memcpy(record, pagebuf + offset, min(maxlen, recordLength));
+  err = PF_UnfixPage(tbl->pf, pageNum, 0);
+  checkerr(err);
+  return min(maxlen, recordLength); // return size of record
 }
 
-void Table_Scan(Table *tbl, void *callbackObj, ReadFunc callbackfn) {
-
-  UNIMPLEMENTED;
-
+void Table_Scan(Table *tbl, void *callbackObj,
+                ReadFunc callbackfn) { //[Yash] Implemented this function
   // For each page obtained using PF_GetFirstPage and PF_GetNextPage
   //    for each record in that page,
   //          callbackfn(callbackObj, rid, record, recordLen)
+  int pagenum;
+  byte *pagebuf;
+  int err = PF_GetFirstPage(tbl->pf, &pagenum, &pagebuf);
+  while (err == PFE_OK) {
+    int numSlots = getNumSlots(pagebuf);
+    for (int slot = 0; slot < numSlots; slot++) {
+      int offset = getNthSlotOffset(slot, pagebuf);
+      int len = getLen(slot, pagebuf);
+      RecId rid = (pagenum << 16) | slot;
+      callbackfn(callbackObj, rid, pagebuf + offset, len);
+    }
+    PF_UnfixPage(tbl->pf, pagenum, FALSE);
+    err = PF_GetNextPage(tbl->pf, &pagenum, &pagebuf);
+  }
 }
