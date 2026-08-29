@@ -25,13 +25,23 @@ in codec.c to convert strings into compact binary representations
  */
 int
 encode(Schema *sch, char **fields, byte *record, int spaceLeft) {
-    UNIMPLEMENTED;
-    // for each field
-    //    switch corresponding schema type is
-    //        VARCHAR : EncodeCString
-    //        INT : EncodeInt
-    //        LONG: EncodeLong
-    // return the total number of bytes encoded into record
+    // [Abhay] Walk the schema column by column, encoding each field
+    // right after the previous one and tracking the running offset.
+    int offset = 0;
+    for (int i = 0; i < sch->numColumns; i++) {
+	switch (sch->columns[i]->type) {
+	    case VARCHAR:
+		offset += EncodeCString(fields[i], record + offset, spaceLeft - offset);
+		break;
+	    case INT:
+		offset += EncodeInt(atoi(fields[i]), record + offset);
+		break;
+	    case LONG:
+		offset += EncodeLong(atoll(fields[i]), record + offset);
+		break;
+	}
+    }
+    return offset;
 }
 
 Schema *
@@ -54,7 +64,18 @@ loadCSV() {
     Schema *sch = parseSchema(line);
     Table *tbl;
 
-    UNIMPLEMENTED;
+    // [Abhay] overwrite=true so a re-run of loaddb starts with a fresh table
+    int err = Table_Open(DB_NAME, sch, true, &tbl);
+    checkerr(err);
+
+    // [Abhay] Create and open the index on the population column
+    // (drop any leftover index from a previous run first, since
+    // AM_CreateIndex fails if the index file already exists)
+    AM_DestroyIndex(DB_NAME, 0);
+    err = AM_CreateIndex(DB_NAME, 0, 'i', sizeof(int));
+    checkerr(err);
+    int indexFD = PF_OpenFile(INDEX_NAME);
+    checkerr(indexFD);
 
     char *tokens[MAX_TOKENS];
     char record[MAX_PAGE_SIZE];
@@ -65,16 +86,18 @@ loadCSV() {
 	int len = encode(sch, tokens, record, sizeof(record));
 	RecId rid;
 
-	UNIMPLEMENTED;
+	// [Abhay] insert the row into the table, then index it by rid
+	err = Table_Insert(tbl, record, len, &rid);
+	checkerr(err);
 
 	printf("%d %s\n", rid, tokens[0]);
 
-	// Indexing on the population column 
+	// Indexing on the population column
 	int population = atoi(tokens[2]);
 
-	UNIMPLEMENTED;
-	// Use the population field as the field to index on
-	    
+	// [Abhay] Use the population field as the field to index on
+	err = AM_InsertEntry(indexFD, 'i', sizeof(int), (char *) &population, rid);
+
 	checkerr(err);
     }
     fclose(fp);
